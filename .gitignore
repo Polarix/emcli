@@ -1,0 +1,11 @@
+# VSCode config
+.vscode
+
+# CMake build
+build
+
+# Build generator
+*.o
+*.a
+*.so
+*.dll
