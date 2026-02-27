@@ -18,7 +18,7 @@
 #endif
 
 #ifndef CLI_HISTORY_SIZE
-#define CLI_HISTORY_SIZE        0     /* 历史命令条数，0表示不启用 */
+#define CLI_HISTORY_SIZE        5     /* 历史命令条数，0表示不启用 */
 #endif
 
 /* 命令行状态 */
@@ -37,7 +37,7 @@ static struct
     size_t len;                        /* 当前行长度 */
     cli_state_t state;                  /* 转义状态 */
 #if CLI_HISTORY_SIZE > 0
-    /* 历史记录暂不实现 */
+    char saved_line[CLI_MAX_LINE_LENGTH]; /* 进入历史浏览前保存的行 */
 #endif
 } s_cli;
 
@@ -54,6 +54,23 @@ typedef struct
 /* 静态命令表实例 */
 static cli_command_table_t s_cmd_table = { .count = 0 };
 
+/* 历史记录结构体（仅在启用时定义） */
+#if CLI_HISTORY_SIZE > 0
+typedef struct
+{
+    char entries[CLI_HISTORY_SIZE][CLI_MAX_LINE_LENGTH]; /* 环形缓冲区 */
+    int count;          /* 当前历史条目数 */
+    int pos;            /* 当前浏览位置，-1 表示不在浏览状态 */
+    int next;           /* 下一个写入位置 */
+} cli_history_t;
+
+static cli_history_t s_history = {
+    .count = 0,
+    .pos = -1,
+    .next = 0
+};
+#endif
+
 /* 静态函数声明 */
 static void cli_newline(void);
 static void cli_backspace(void);
@@ -64,6 +81,11 @@ static void cli_handle_tab(void);
 static int  cli_find_command_matches(const char *prefix, char *matched_name, size_t matched_name_size);
 static void cli_vprintf(const char *format, va_list args);
 static const char* cli_get_prompt(void);
+#if CLI_HISTORY_SIZE > 0
+static void cli_history_add(const char *cmd);
+static void cli_history_up(void);
+static void cli_history_down(void);
+#endif
 
 /* 初始化 */
 void cli_init(const cli_io_t *io)
@@ -71,6 +93,11 @@ void cli_init(const cli_io_t *io)
     s_io = io;
     memset(&s_cli, 0, sizeof(s_cli));
     s_cli.state = CLI_STATE_NORMAL;
+#if CLI_HISTORY_SIZE > 0
+    s_history.count = 0;
+    s_history.pos = -1;
+    s_history.next = 0;
+#endif
     cli_puts(cli_get_prompt());
 }
 
@@ -199,9 +226,18 @@ void cli_process_char(char c)
             switch (c)
             {
                 case 'A': /* 上箭头 */
-                    /* 历史命令，暂不实现 */
+#if CLI_HISTORY_SIZE > 0
+                    cli_history_up();
+#else
+                    cli_putchar('\a'); /* 未启用历史，响铃提示 */
+#endif
                     break;
                 case 'B': /* 下箭头 */
+#if CLI_HISTORY_SIZE > 0
+                    cli_history_down();
+#else
+                    cli_putchar('\a');
+#endif
                     break;
                 case 'C': /* 右箭头 */
                     if (s_cli.pos < s_cli.len)
@@ -290,8 +326,10 @@ static void cli_newline(void)
 static void cli_redraw_line(void)
 {
     size_t i;
-    cli_puts(cli_get_prompt());
-    cli_puts(s_cli.line);
+    cli_puts("\r");                /* 回到行首 */
+    cli_puts(cli_get_prompt());    /* 输出提示符 */
+    cli_puts(s_cli.line);          /* 输出当前行内容 */
+    cli_puts("\033[K");            /* 清除从光标到行尾的内容 */
     /* 将光标移回原位置（从行尾左移 len - pos 个字符） */
     for (i = s_cli.len; i > s_cli.pos; i--)
     {
@@ -332,10 +370,7 @@ static void cli_backspace(void)
     }
 }
 
-/* 查找匹配的命令前缀
- * 返回值：匹配的命令个数
- * 如果 count == 1，matched_name 填充实际匹配的名字（长名或短名）
- */
+/* 查找匹配的命令前缀 */
 static int cli_find_command_matches(const char *prefix, char *matched_name, size_t matched_name_size)
 {
     int count = 0;
@@ -433,7 +468,6 @@ static void cli_handle_tab(void)
             s_cli.len = new_len;
             s_cli.pos = word_start - s_cli.line + full_len;
 
-            cli_puts("\r");
             cli_redraw_line();
         }
     }
@@ -466,12 +500,122 @@ static void cli_handle_tab(void)
     }
 }
 
+#if CLI_HISTORY_SIZE > 0
+/* 添加命令到历史记录（避免重复） */
+static void cli_history_add(const char *cmd)
+{
+    if (cmd == NULL || cmd[0] == '\0')
+        return;
+
+    /* 检查是否与最近一条历史重复 */
+    if (s_history.count > 0)
+    {
+        int last_idx = (s_history.next - 1 + CLI_HISTORY_SIZE) % CLI_HISTORY_SIZE;
+        if (strcmp(s_history.entries[last_idx], cmd) == 0)
+            return; /* 重复，不添加 */
+    }
+
+    /* 将命令复制到环形缓冲区 */
+    strncpy(s_history.entries[s_history.next], cmd, CLI_MAX_LINE_LENGTH - 1);
+    s_history.entries[s_history.next][CLI_MAX_LINE_LENGTH - 1] = '\0';
+
+    s_history.next = (s_history.next + 1) % CLI_HISTORY_SIZE;
+    if (s_history.count < CLI_HISTORY_SIZE)
+        s_history.count++;
+}
+
+/* 上箭头：显示上一条历史命令 */
+static void cli_history_up(void)
+{
+    if (s_history.count == 0)
+    {
+        cli_putchar('\a');
+        return;
+    }
+
+    if (s_history.pos == -1)
+    {
+        /* 首次进入历史浏览：保存当前行 */
+        strncpy(s_cli.saved_line, s_cli.line, CLI_MAX_LINE_LENGTH - 1);
+        s_cli.saved_line[CLI_MAX_LINE_LENGTH - 1] = '\0';
+        /* 从最新一条历史开始 */
+        s_history.pos = (s_history.next - 1 + CLI_HISTORY_SIZE) % CLI_HISTORY_SIZE;
+    }
+    else
+    {
+        /* 检查是否已经是最旧的一条 */
+        int oldest = (s_history.next - s_history.count + CLI_HISTORY_SIZE) % CLI_HISTORY_SIZE;
+        if (s_history.pos == oldest)
+        {
+            cli_putchar('\a');
+            return;
+        }
+        /* 向前移动一条 */
+        s_history.pos = (s_history.pos - 1 + CLI_HISTORY_SIZE) % CLI_HISTORY_SIZE;
+    }
+
+    /* 用历史命令替换当前行 */
+    strncpy(s_cli.line, s_history.entries[s_history.pos], CLI_MAX_LINE_LENGTH - 1);
+    s_cli.line[CLI_MAX_LINE_LENGTH - 1] = '\0';
+    s_cli.len = strlen(s_cli.line);
+    s_cli.pos = s_cli.len; /* 光标移到末尾 */
+
+    /* 重绘整行 */
+    cli_redraw_line();
+}
+
+/* 下箭头：显示下一条历史命令或恢复原始行 */
+static void cli_history_down(void)
+{
+    if (s_history.count == 0)
+    {
+        cli_putchar('\a');
+        return;
+    }
+
+    if (s_history.pos == -1)
+    {
+        cli_putchar('\a');
+        return;
+    }
+
+    int newest = (s_history.next - 1 + CLI_HISTORY_SIZE) % CLI_HISTORY_SIZE;
+    if (s_history.pos == newest)
+    {
+        /* 已经是最新，退出历史浏览，恢复原始行 */
+        strncpy(s_cli.line, s_cli.saved_line, CLI_MAX_LINE_LENGTH - 1);
+        s_cli.line[CLI_MAX_LINE_LENGTH - 1] = '\0';
+        s_cli.len = strlen(s_cli.line);
+        s_cli.pos = s_cli.len;
+        s_history.pos = -1;
+    }
+    else
+    {
+        /* 向后移动一条 */
+        s_history.pos = (s_history.pos + 1) % CLI_HISTORY_SIZE;
+        strncpy(s_cli.line, s_history.entries[s_history.pos], CLI_MAX_LINE_LENGTH - 1);
+        s_cli.line[CLI_MAX_LINE_LENGTH - 1] = '\0';
+        s_cli.len = strlen(s_cli.line);
+        s_cli.pos = s_cli.len;
+    }
+
+    /* 重绘整行 */
+    cli_redraw_line();
+}
+#endif /* CLI_HISTORY_SIZE > 0 */
+
 /* 执行命令行 */
 static void cli_execute(void)
 {
     char *argv[CLI_MAX_ARGS];
     int argc;
     int found = 0;
+#if CLI_HISTORY_SIZE > 0
+    char cmd_copy[CLI_MAX_LINE_LENGTH];
+    /* 在执行前保存原始命令行（用于历史记录） */
+    strncpy(cmd_copy, s_cli.line, CLI_MAX_LINE_LENGTH - 1);
+    cmd_copy[CLI_MAX_LINE_LENGTH - 1] = '\0';
+#endif
 
     argc = cli_parse_line(s_cli.line, argv, CLI_MAX_ARGS);
 
@@ -506,6 +650,16 @@ static void cli_execute(void)
     s_cli.len = 0;
     s_cli.pos = 0;
     memset(s_cli.line, 0, sizeof(s_cli.line));
+
+#if CLI_HISTORY_SIZE > 0
+    /* 如果命令行非空，添加到历史记录 */
+    if (cmd_copy[0] != '\0')
+    {
+        cli_history_add(cmd_copy);
+    }
+    /* 重置历史浏览状态 */
+    s_history.pos = -1;
+#endif
 }
 
 /* 解析命令行参数 */
