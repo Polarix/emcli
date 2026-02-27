@@ -4,6 +4,12 @@
 # CMake build
 build
 
+# Backup
+*.bk
+*.bak
+*.tmp
+*.swp
+
 # Build generator
 *.o
 *.a
