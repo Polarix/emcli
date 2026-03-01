@@ -21,6 +21,10 @@
 #define CLI_HISTORY_SIZE        5     /* 历史命令条数，0表示不启用 */
 #endif
 
+#ifndef CLI_OUTPUT_NEWLINE
+#define CLI_OUTPUT_NEWLINE      "\r\n"   /* 默认 CRLF，Windows 风格 */
+#endif
+
 /* 命令行状态 */
 typedef enum
 {
@@ -319,7 +323,7 @@ void cli_process_char(char c)
 /* 换行 */
 static void cli_newline(void)
 {
-    cli_puts("\r\n");
+    cli_puts(CLI_OUTPUT_NEWLINE);
 }
 
 /* 重绘当前行（在列出候选命令后恢复输入行） */
