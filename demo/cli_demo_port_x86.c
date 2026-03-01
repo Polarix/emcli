@@ -10,6 +10,9 @@
 #if defined(_WIN32) || defined(_WIN64)
 #include <conio.h>
 #include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
 #elif defined(__linux__) || defined(__unix__)
 #include <termios.h>
 #include <unistd.h>
@@ -31,18 +34,16 @@ static char s_esc_buffer[ESC_BUFFER_SIZE];
 static int s_esc_buffer_rd = 0;
 static int s_esc_buffer_wr = 0;
 
-/* 向缓冲区写入一个字符 */
 static void esc_buffer_put(char c)
 {
     int next = (s_esc_buffer_wr + 1) % ESC_BUFFER_SIZE;
-    if (next != s_esc_buffer_rd) /* 未满 */
+    if (next != s_esc_buffer_rd)
     {
         s_esc_buffer[s_esc_buffer_wr] = c;
         s_esc_buffer_wr = next;
     }
 }
 
-/* 从缓冲区读取一个字符，返回 -1 若无 */
 static int esc_buffer_get(void)
 {
     if (s_esc_buffer_rd == s_esc_buffer_wr)
@@ -57,7 +58,14 @@ void platform_init(void)
 {
 #if defined(_WIN32) || defined(_WIN64)
     SetConsoleOutputCP(CP_UTF8);
-    /* 清空缓冲区 */
+    /* 启用虚拟终端处理（支持ANSI转义序列） */
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD dwMode = 0;
+    if (GetConsoleMode(hOut, &dwMode))
+    {
+        dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(hOut, dwMode);
+    }
     s_esc_buffer_rd = s_esc_buffer_wr = 0;
 #elif defined(__linux__) || defined(__unix__)
     struct termios new_termios;
@@ -89,19 +97,16 @@ void platform_cleanup(void)
 int platform_getchar(void)
 {
 #if defined(_WIN32) || defined(_WIN64)
-    /* 首先检查模拟缓冲区 */
     int c = esc_buffer_get();
     if (c != -1)
         return c;
 
-    /* 无缓冲，从键盘读取 */
     if (_kbhit())
     {
         int ch = _getch();
-        if (ch == 0xE0 || ch == 0x00) /* 扩展键 */
+        if (ch == 0xE0 || ch == 0x00)
         {
-            int ext = _getch(); /* 读取第二个字节 */
-            /* 根据扩展键值映射到 ANSI 转义序列 */
+            int ext = _getch();
             switch (ext)
             {
                 case 0x48: /* 上箭头 */
@@ -125,30 +130,25 @@ int platform_getchar(void)
                     esc_buffer_put('D');
                     break;
                 default:
-                    /* 其他功能键忽略 */
                     break;
             }
-            /* 返回缓冲区的第一个字符 */
             return esc_buffer_get();
         }
         else
         {
-            /* 普通字符直接返回 */
-            return ch;
+            return ch;  /* 普通字符，包括 TAB (9) 和回车 (13) */
         }
     }
     return -1;
 #elif defined(__linux__) || defined(__unix__)
     fd_set readfds;
     struct timeval tv;
-    int ret;
     char c;
     FD_ZERO(&readfds);
     FD_SET(STDIN_FILENO, &readfds);
     tv.tv_sec = 0;
     tv.tv_usec = 0;
-    ret = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
-    if (ret > 0 && FD_ISSET(STDIN_FILENO, &readfds))
+    if (select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv) > 0)
     {
         if (read(STDIN_FILENO, &c, 1) == 1)
         {
