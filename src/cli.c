@@ -30,7 +30,8 @@ typedef enum
 {
     CLI_STATE_NORMAL,          /* 正常接收状态 */
     CLI_STATE_ESC,             /* 收到ESC，等待后续 */
-    CLI_STATE_CSI              /* 收到CSI，等待后续 */
+    CLI_STATE_CSI,             /* 收到CSI，等待后续 */
+    CLI_STATE_SS3              /* 收到SS3 (ESC O)，等待后续 */
 } cli_state_t;
 
 /* 全局CLI数据 */
@@ -211,12 +212,15 @@ void cli_process_char(char c)
     /* 先处理转义序列 */
     if (s_cli.state != CLI_STATE_NORMAL)
     {
-        /* 简化的转义处理，只处理方向键等，可以扩展 */
         if (s_cli.state == CLI_STATE_ESC)
         {
             if (c == '[')
             {
                 s_cli.state = CLI_STATE_CSI;
+            }
+            else if (c == 'O')   /* 支持 ESC O 序列（SS3） */
+            {
+                s_cli.state = CLI_STATE_SS3;
             }
             else
             {
@@ -247,14 +251,58 @@ void cli_process_char(char c)
                     if (s_cli.pos < s_cli.len)
                     {
                         s_cli.pos++;
-                        cli_putchar(c); /* 移动光标 */
+                        /* 光标右移 */
+                        cli_putchar('\033');
+                        cli_putchar('[');
+                        cli_putchar('C');
                     }
                     break;
                 case 'D': /* 左箭头 */
                     if (s_cli.pos > 0)
                     {
                         s_cli.pos--;
-                        cli_putchar(c); /* 移动光标 */
+                        /* 光标左移 */
+                        cli_putchar('\033');
+                        cli_putchar('[');
+                        cli_putchar('D');
+                    }
+                    break;
+                default:
+                    break;
+            }
+            s_cli.state = CLI_STATE_NORMAL;
+        }
+        else if (s_cli.state == CLI_STATE_SS3)
+        {
+            /* SS3 序列：ESC O A/B/C/D 处理方式与 CSI 相同 */
+            switch (c)
+            {
+                case 'A': /* 上箭头 */
+#if CLI_HISTORY_SIZE > 0
+                    cli_history_up();
+#endif
+                    break;
+                case 'B': /* 下箭头 */
+#if CLI_HISTORY_SIZE > 0
+                    cli_history_down();
+#endif
+                    break;
+                case 'C': /* 右箭头 */
+                    if (s_cli.pos < s_cli.len)
+                    {
+                        s_cli.pos++;
+                        cli_putchar('\033');
+                        cli_putchar('[');
+                        cli_putchar('C');
+                    }
+                    break;
+                case 'D': /* 左箭头 */
+                    if (s_cli.pos > 0)
+                    {
+                        s_cli.pos--;
+                        cli_putchar('\033');
+                        cli_putchar('[');
+                        cli_putchar('D');
                     }
                     break;
                 default:
@@ -293,29 +341,17 @@ void cli_process_char(char c)
             /* 如果有字符在光标后，需要插入 */
             if (s_cli.pos < s_cli.len)
             {
-                /* 移动后续字符 */
+                /* 移动后续字符，包含终止符 */
                 memmove(&s_cli.line[s_cli.pos + 1],
                         &s_cli.line[s_cli.pos],
-                        s_cli.len - s_cli.pos);
+                        s_cli.len - s_cli.pos + 1);
             }
             s_cli.line[s_cli.pos] = c;
             s_cli.pos++;
             s_cli.len++;
 
-            /* 回显并重绘后续字符 */
-            cli_putchar(c);
-            if (s_cli.pos < s_cli.len)
-            {
-                size_t i;
-                for (i = s_cli.pos; i < s_cli.len; i++)
-                {
-                    cli_putchar(s_cli.line[i]);
-                }
-                for (i = s_cli.pos; i < s_cli.len; i++)
-                {
-                    cli_putchar('\b');
-                }
-            }
+            /* 重绘整行，确保删除行中间字符时正常更新显示 */
+            cli_redraw_line();
         }
     }
 }
@@ -346,31 +382,15 @@ static void cli_backspace(void)
 {
     if (s_cli.pos > 0)
     {
-        /* 删除光标前一个字符 */
+        /* 删除光标前一个字符，保留终止符 */
         memmove(&s_cli.line[s_cli.pos - 1],
                 &s_cli.line[s_cli.pos],
                 s_cli.len - s_cli.pos + 1);
         s_cli.pos--;
         s_cli.len--;
 
-        /* 退格显示：光标左移，输出空格，再左移 */
-        cli_putchar('\b');
-        cli_putchar(' ');
-        cli_putchar('\b');
-
-        /* 如果删除后还有后续字符，需要重新显示并移回光标 */
-        if (s_cli.pos < s_cli.len)
-        {
-            size_t i;
-            for (i = s_cli.pos; i < s_cli.len; i++)
-            {
-                cli_putchar(s_cli.line[i]);
-            }
-            for (i = s_cli.pos; i < s_cli.len; i++)
-            {
-                cli_putchar('\b');
-            }
-        }
+        /* 重绘整行，确保删除行中间字符时正常更新显示 */
+        cli_redraw_line();
     }
 }
 
