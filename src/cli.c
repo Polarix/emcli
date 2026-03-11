@@ -349,7 +349,7 @@ static void cli_backspace(void)
         /* 删除光标前一个字符 */
         memmove(&s_cli.line[s_cli.pos - 1],
                 &s_cli.line[s_cli.pos],
-                s_cli.len - s_cli.pos);
+                s_cli.len - s_cli.pos + 1);
         s_cli.pos--;
         s_cli.len--;
 
